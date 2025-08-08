@@ -512,9 +512,22 @@ def notebook(preprocessor, tag, markup):
             "this should be included in the theme. **\n"
         )
 
-        header = "\n".join(
-            CSS_WRAPPER.format(css_line) for css_line in resources["inlining"]["css"]
-        )
+        # Filter out excessive CSS - only keep essential notebook CSS
+        filtered_css = []
+        for css_line in resources["inlining"]["css"]:
+            # Skip modern JupyterLab theme CSS variables and excessive styling
+            if ('var(--jp-' not in css_line and 
+                'pre { line-height:' not in css_line and
+                'td.linenos' not in css_line and
+                'span.linenos' not in css_line and
+                '.highlight' not in css_line):
+                filtered_css.append(css_line)
+        
+        # Only include filtered CSS if there's any, otherwise use our minimal CSS
+        if filtered_css:
+            header = "\n".join(CSS_WRAPPER.format(css_line) for css_line in filtered_css)
+        else:
+            header = ""
         header += JS_INCLUDE
 
         with open("_nb_header.html", "w") as f:
