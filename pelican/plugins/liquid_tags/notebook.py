@@ -292,6 +292,9 @@ def notebook(preprocessor, tag, markup):
 
     exporter = HTMLExporter(
         config=c,
+        template_name='basic',
+        exclude_input_prompt=True,
+        exclude_output_prompt=True,
         filters={"highlight2html": language_applied_highlighter},
         preprocessors=[SubCell],
     )
@@ -316,24 +319,31 @@ def notebook(preprocessor, tag, markup):
 
     # if we haven't already saved the header, save it here.
     if not notebook.header_saved:
+        # Write notebook CSS to a separate file
+        nb_css_content = ""
+        if "inlining" in resources and "css" in resources["inlining"]:
+            # Filter out JupyterLab-specific CSS and keep only essential styles
+            essential_css = []
+            for css_line in resources["inlining"]["css"]:
+                # Skip JupyterLab variables, excessive styling, and code highlighting
+                if not any(skip in css_line for skip in [
+                    'var(--jp-', ':root{--jp-', '.jp-',
+                    'pre { line-height:', 'td.linenos', 'span.linenos',
+                    '.highlight{', '.highlight .', '.highlight-'
+                ]):
+                    essential_css.append(css_line)
 
-        # Filter out excessive CSS - only keep essential notebook CSS
-        filtered_css = []
-        for css_line in resources["inlining"]["css"]:
-            # Skip modern JupyterLab theme CSS variables and excessive styling
-            if ('var(--jp-' not in css_line and
-                'pre { line-height:' not in css_line and
-                'td.linenos' not in css_line and
-                'span.linenos' not in css_line and
-                '.highlight' not in css_line):
-                filtered_css.append(css_line)
+            if essential_css:
+                nb_css_content = "\n".join(essential_css)
 
-        # Only include filtered CSS if there's any, otherwise use our minimal CSS
-        if filtered_css:
-            header = "\n".join(CSS_WRAPPER.format(css_line) for css_line in filtered_css)
-        else:
-            header = ""
-        header += JS_INCLUDE
+        # Write CSS to theme directory to match other CSS files
+        css_file_path = "output/theme/css/notebook-style.css"
+        os.makedirs(os.path.dirname(css_file_path), exist_ok=True)
+        with open(css_file_path, "w") as f:
+            f.write(nb_css_content)
+
+        # Create minimal header file that just references the CSS file with proper relative path
+        header = '<link rel="stylesheet" type="text/css" href="../../theme/css/notebook-style.css">\n'
 
         with open("_nb_header.html", "w") as f:
             f.write(header)
