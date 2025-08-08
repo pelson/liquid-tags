@@ -52,181 +52,25 @@ from copy import deepcopy
 from functools import partial
 import os
 import re
-import warnings
 
-import IPython
 from pygments.formatters import HtmlFormatter
-
-# from pelican import settings  # Not needed for Pelican 4+
 
 from .mdx_liquid_tags import LiquidTags
 
-IPYTHON_VERSION = IPython.version_info[0]
-
-try:
-    import nbformat
-except ImportError:
-    pass
-
-if not IPYTHON_VERSION >= 1:
-    raise ValueError("IPython version 1.0+ required for notebook tag")
-
-if IPYTHON_VERSION > 1:
-    warnings.warn(
-        "Pelican plugin is not designed to work with IPython "
-        "versions greater than 1.x. CSS styles have changed in "
-        "later releases."
-    )
-
-try:
-    from nbconvert.filters.highlight import _pygments_highlight
-except ImportError:
-    try:
-        from IPython.nbconvert.filters.highlight import _pygments_highlight
-    except ImportError:
-        # IPython < 2.0
-        from IPython.nbconvert.filters.highlight import (
-            _pygment_highlight as _pygments_highlight,
-        )
-
-try:
-    from nbconvert.exporters import HTMLExporter
-except ImportError:
-    from IPython.nbconvert.exporters import HTMLExporter
-
-try:
-    from traitlets.config import Config
-except ImportError:
-    from IPython.config import Config
-
-try:
-    from nbconvert.preprocessors import Preprocessor, ExtractOutputPreprocessor
-except ImportError:
-    try:
-        from IPython.nbconvert.preprocessors import (
-            Preprocessor,
-            ExtractOutputPreprocessor,
-        )
-    except ImportError:
-        # IPython < 2.0
-        from IPython.nbconvert.transformers import Transformer as Preprocessor
-        from IPython.nbconvert.transformers import ExtractOutputTransformer
+import nbformat
 
 
-# Custom ExtractOutputPreprocessor that allows duplicate filenames
-class PelicanExtractOutputPreprocessor(ExtractOutputPreprocessor):
-    """
-    Custom ExtractOutputPreprocessor that doesn't fail on duplicate filenames.
-    Instead, it overwrites the previous output with the same filename.
-    This matches the behavior expected by the notebook plugin.
-    """
-    
-    def preprocess_cell(self, cell, resources, cell_index):
-        """
-        Apply a transformation on each cell, allowing duplicate filenames.
-        """
-        # Call the parent method but catch ValueError for duplicate filenames
-        try:
-            return super().preprocess_cell(cell, resources, cell_index)
-        except ValueError as e:
-            if "Filenames need to be unique across the notebook" in str(e):
-                # Handle duplicate filename by allowing overwrite
-                # Re-run the parent logic but skip the duplicate check
-                return self._preprocess_cell_allow_duplicates(cell, resources, cell_index)
-            else:
-                raise
-    
-    def _preprocess_cell_allow_duplicates(self, cell, resources, cell_index):
-        """
-        Modified version of preprocess_cell that allows filename duplicates.
-        This is a copy of the parent logic without the duplicate filename check.
-        """
-        from textwrap import dedent
-        from binascii import a2b_base64
-        import json
-        import os
-        import sys
-        from mimetypes import guess_extension
-        
-        def guess_extension_without_jpe(mimetype):
-            ext = guess_extension(mimetype)
-            if ext == ".jpe":
-                ext = ".jpeg"
-            return ext
-        
-        def platform_utf_8_encode(data):
-            text_type = str if sys.version_info >= (3,) else basestring
-            if isinstance(data, text_type):
-                if sys.platform == 'win32':
-                    data = data.replace('\n', '\r\n')
-                data = data.encode('utf-8')
-            return data
-        
-        # Get the unique key from the resource dict if it exists
-        unique_key = resources.get('unique_key', 'output')
-        output_files_dir = resources.get('output_files_dir', None)
-        
-        # Make sure outputs key exists
-        if not isinstance(resources['outputs'], dict):
-            resources['outputs'] = {}
-        
-        # Loop through all of the outputs in the cell
-        for index, out in enumerate(cell.get('outputs', [])):
-            if out.output_type not in {'display_data', 'execute_result'}:
-                continue
-            if 'text/html' in out.data:
-                out['data']['text/html'] = dedent(out['data']['text/html'])
-                
-            # Get the output in data formats that the template needs extracted
-            for mime_type in self.extract_output_types:
-                if mime_type in out.data:
-                    data = out.data[mime_type]
-                    
-                    # Binary files are base64-encoded, SVG is already XML
-                    if mime_type in {'image/png', 'image/jpeg', 'application/pdf'}:
-                        data = a2b_base64(data)
-                    elif mime_type == 'application/json' or not isinstance(data, str):
-                        if isinstance(data, bytes) and not isinstance(data, str):
-                            data = data.decode('utf-8')
-                        data = platform_utf_8_encode(json.dumps(data))
-                    else:
-                        data = platform_utf_8_encode(data)
-                    
-                    ext = guess_extension_without_jpe(mime_type)
-                    if ext is None:
-                        ext = '.' + mime_type.rsplit('/')[-1]
-                        
-                    if out.metadata.get('filename', ''):
-                        filename = out.metadata['filename']
-                        if not filename.endswith(ext):
-                            filename += ext
-                    else:
-                        filename = self.output_filename_template.format(
-                            unique_key=unique_key,
-                            cell_index=cell_index,
-                            index=index,
-                            extension=ext
-                        )
-                    
-                    if output_files_dir is not None:
-                        filename = os.path.join(output_files_dir, filename)
-                    
-                    out.metadata.setdefault('filenames', {})
-                    out.metadata['filenames'][mime_type] = filename
-                    
-                    # SKIP the duplicate filename check - just overwrite
-                    # if filename in resources['outputs']:
-                    #     raise ValueError(...)
-                    
-                    # In the resources, make the figure available
-                    resources['outputs'][filename] = data
-        
-        return cell, resources
+from nbconvert.filters.highlight import _pygments_highlight
 
-try:
-    from traitlets import Integer
-except ImportError:
-    from IPython.utils.traitlets import Integer
+from nbconvert.exporters import HTMLExporter
+
+from traitlets.config import Config
+
+from nbconvert.preprocessors import Preprocessor
+
+
+
+from traitlets import Integer
 
 # ----------------------------------------------------------------------
 # Some code that will be added to the header:
@@ -347,16 +191,9 @@ class SubCell(Preprocessor):
 
     def preprocess(self, nb, resources):
         nbc = deepcopy(nb)
-        if IPYTHON_VERSION < 3:
-            for worksheet in nbc.worksheets:
-                cells = worksheet.cells[:]
-                worksheet.cells = cells[self.start : self.end]
-        else:
-            nbc.cells = nbc.cells[self.start : self.end]
-
+        nbc.cells = nbc.cells[self.start : self.end]
         return nbc, resources
 
-    call = preprocess  # IPython < 2.0
 
 
 # ----------------------------------------------------------------------
@@ -431,6 +268,7 @@ def notebook(preprocessor, tag, markup):
                 "highlight_class": ".highlight-ipynb",
             },
             "SubCell": {"enabled": True, "start": start, "end": end},
+
             "ExtractOutputPreprocessor": {
                 "enabled": True,
                 "output_filename_template": tmpl,
@@ -443,54 +281,25 @@ def notebook(preprocessor, tag, markup):
                 "highlight_class": ".highlight-ipynb",
             },
             "SubCell": {"enabled": True, "start": start, "end": end},
+            "ExtractOutputPreprocessor": {
+                "enabled": False,
+            }
         }
 
     # Create the custom notebook converter
     c = Config(config_dict)
 
-    """
-    # FIXME: doesn't use plugin as source of templates, see:
-    # https://github.com/pelican-plugins/liquid-tags/issues/3
-    template_file = "basic"
-    if IPYTHON_VERSION >= 3:
-        if os.path.exists("pelicanhtml_3.tpl"):
-            template_file = "pelicanhtml_3"
-    elif IPYTHON_VERSION == 2:
-        if os.path.exists("pelicanhtml_2.tpl"):
-            template_file = "pelicanhtml_2"
-    else:
-        if os.path.exists("pelicanhtml_1.tpl"):
-            template_file = "pelicanhtml_1"
-    """
-
-    if IPYTHON_VERSION >= 2:
-        if notebook_output is not False:
-            subcell_kwarg = dict(preprocessors=[SubCell, PelicanExtractOutputPreprocessor])
-        else:
-            subcell_kwarg = dict(preprocessors=[SubCell])
-    else:
-        if notebook_output is not False:
-            subcell_kwarg = dict(transformers=[SubCell, ExtractOutputTransformer])
-        else:
-            subcell_kwarg = dict(transformers=[SubCell])
 
     exporter = HTMLExporter(
         config=c,
-        # template_file=template_file,
         filters={"highlight2html": language_applied_highlighter},
-        **subcell_kwarg,
+        preprocessors=[SubCell],
     )
 
     # read and parse the notebook
     with open(nb_path, encoding="utf-8") as f:
         nb_text = f.read()
-        if IPYTHON_VERSION < 3:
-            nb_json = IPython.nbformat.current.reads_json(nb_text)
-        else:
-            try:
-                nb_json = nbformat.reads(nb_text, as_version=4)
-            except NameError:
-                nb_json = IPython.nbformat.reads(nb_text, as_version=4)
+        nb_json = nbformat.reads(nb_text, as_version=4)
 
     (body, resources) = exporter.from_notebook_node(nb_json)
     for name, data in resources.get("outputs", {}).items():
@@ -507,22 +316,18 @@ def notebook(preprocessor, tag, markup):
 
     # if we haven't already saved the header, save it here.
     if not notebook.header_saved:
-        print(
-            "\n ** Writing styles to _nb_header.html: "
-            "this should be included in the theme. **\n"
-        )
 
         # Filter out excessive CSS - only keep essential notebook CSS
         filtered_css = []
         for css_line in resources["inlining"]["css"]:
             # Skip modern JupyterLab theme CSS variables and excessive styling
-            if ('var(--jp-' not in css_line and 
+            if ('var(--jp-' not in css_line and
                 'pre { line-height:' not in css_line and
                 'td.linenos' not in css_line and
                 'span.linenos' not in css_line and
                 '.highlight' not in css_line):
                 filtered_css.append(css_line)
-        
+
         # Only include filtered CSS if there's any, otherwise use our minimal CSS
         if filtered_css:
             header = "\n".join(CSS_WRAPPER.format(css_line) for css_line in filtered_css)
