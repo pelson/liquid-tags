@@ -57,6 +57,8 @@ import warnings
 import IPython
 from pygments.formatters import HtmlFormatter
 
+# from pelican import settings  # Not needed for Pelican 4+
+
 from .mdx_liquid_tags import LiquidTags
 
 IPYTHON_VERSION = IPython.version_info[0]
@@ -98,13 +100,128 @@ except ImportError:
     from IPython.config import Config
 
 try:
-    from nbconvert.preprocessors import Preprocessor
+    from nbconvert.preprocessors import Preprocessor, ExtractOutputPreprocessor
 except ImportError:
     try:
-        from IPython.nbconvert.preprocessors import Preprocessor
+        from IPython.nbconvert.preprocessors import (
+            Preprocessor,
+            ExtractOutputPreprocessor,
+        )
     except ImportError:
         # IPython < 2.0
         from IPython.nbconvert.transformers import Transformer as Preprocessor
+        from IPython.nbconvert.transformers import ExtractOutputTransformer
+
+
+# Custom ExtractOutputPreprocessor that allows duplicate filenames
+class PelicanExtractOutputPreprocessor(ExtractOutputPreprocessor):
+    """
+    Custom ExtractOutputPreprocessor that doesn't fail on duplicate filenames.
+    Instead, it overwrites the previous output with the same filename.
+    This matches the behavior expected by the notebook plugin.
+    """
+    
+    def preprocess_cell(self, cell, resources, cell_index):
+        """
+        Apply a transformation on each cell, allowing duplicate filenames.
+        """
+        # Call the parent method but catch ValueError for duplicate filenames
+        try:
+            return super().preprocess_cell(cell, resources, cell_index)
+        except ValueError as e:
+            if "Filenames need to be unique across the notebook" in str(e):
+                # Handle duplicate filename by allowing overwrite
+                # Re-run the parent logic but skip the duplicate check
+                return self._preprocess_cell_allow_duplicates(cell, resources, cell_index)
+            else:
+                raise
+    
+    def _preprocess_cell_allow_duplicates(self, cell, resources, cell_index):
+        """
+        Modified version of preprocess_cell that allows filename duplicates.
+        This is a copy of the parent logic without the duplicate filename check.
+        """
+        from textwrap import dedent
+        from binascii import a2b_base64
+        import json
+        import os
+        import sys
+        from mimetypes import guess_extension
+        
+        def guess_extension_without_jpe(mimetype):
+            ext = guess_extension(mimetype)
+            if ext == ".jpe":
+                ext = ".jpeg"
+            return ext
+        
+        def platform_utf_8_encode(data):
+            text_type = str if sys.version_info >= (3,) else basestring
+            if isinstance(data, text_type):
+                if sys.platform == 'win32':
+                    data = data.replace('\n', '\r\n')
+                data = data.encode('utf-8')
+            return data
+        
+        # Get the unique key from the resource dict if it exists
+        unique_key = resources.get('unique_key', 'output')
+        output_files_dir = resources.get('output_files_dir', None)
+        
+        # Make sure outputs key exists
+        if not isinstance(resources['outputs'], dict):
+            resources['outputs'] = {}
+        
+        # Loop through all of the outputs in the cell
+        for index, out in enumerate(cell.get('outputs', [])):
+            if out.output_type not in {'display_data', 'execute_result'}:
+                continue
+            if 'text/html' in out.data:
+                out['data']['text/html'] = dedent(out['data']['text/html'])
+                
+            # Get the output in data formats that the template needs extracted
+            for mime_type in self.extract_output_types:
+                if mime_type in out.data:
+                    data = out.data[mime_type]
+                    
+                    # Binary files are base64-encoded, SVG is already XML
+                    if mime_type in {'image/png', 'image/jpeg', 'application/pdf'}:
+                        data = a2b_base64(data)
+                    elif mime_type == 'application/json' or not isinstance(data, str):
+                        if isinstance(data, bytes) and not isinstance(data, str):
+                            data = data.decode('utf-8')
+                        data = platform_utf_8_encode(json.dumps(data))
+                    else:
+                        data = platform_utf_8_encode(data)
+                    
+                    ext = guess_extension_without_jpe(mime_type)
+                    if ext is None:
+                        ext = '.' + mime_type.rsplit('/')[-1]
+                        
+                    if out.metadata.get('filename', ''):
+                        filename = out.metadata['filename']
+                        if not filename.endswith(ext):
+                            filename += ext
+                    else:
+                        filename = self.output_filename_template.format(
+                            unique_key=unique_key,
+                            cell_index=cell_index,
+                            index=index,
+                            extension=ext
+                        )
+                    
+                    if output_files_dir is not None:
+                        filename = os.path.join(output_files_dir, filename)
+                    
+                    out.metadata.setdefault('filenames', {})
+                    out.metadata['filenames'][mime_type] = filename
+                    
+                    # SKIP the duplicate filename check - just overwrite
+                    # if filename in resources['outputs']:
+                    #     raise ValueError(...)
+                    
+                    # In the resources, make the figure available
+                    resources['outputs'][filename] = data
+        
+        return cell, resources
 
 try:
     from traitlets import Integer
@@ -291,23 +408,45 @@ def notebook(preprocessor, tag, markup):
     language_applied_highlighter = partial(custom_highlighter, language=language)
 
     nb_dir = preprocessor.configs.getConfig("NOTEBOOK_DIR")
-    nb_path = os.path.join(
-        preprocessor.configs.getConfig("PATH", "content"), nb_dir, src
-    )
+    content_path = getattr(preprocessor.configs, 'PATH', 'content')
+    nb_path = os.path.join(content_path, nb_dir, src)
 
     if not os.path.exists(nb_path):
         raise ValueError(f"File {nb_path} could not be found")
 
-    # Create the custom notebook converter
-    c = Config(
-        {
+    notebook_output = preprocessor.configs.getConfig("NOTEBOOK_OUTPUT")
+    if notebook_output is not False:
+        output_prefix = os.path.join("content", notebook_output)
+        # Note: This should be relative to the *target* fpath, but we don't
+        # have that context within this extension. :(
+        rel_output_prefix = os.path.relpath(output_prefix, os.path.dirname(nb_path))
+        tmpl = (
+            os.path.join(rel_output_prefix, os.path.splitext(src)[0])
+            + "_{unique_key}_{cell_index}_{index}{extension}"
+        )
+
+        config_dict = {
+            "CSSHTMLHeaderTransformer": {
+                "enabled": True,
+                "highlight_class": ".highlight-ipynb",
+            },
+            "SubCell": {"enabled": True, "start": start, "end": end},
+            "ExtractOutputPreprocessor": {
+                "enabled": True,
+                "output_filename_template": tmpl,
+            },
+        }
+    else:
+        config_dict = {
             "CSSHTMLHeaderTransformer": {
                 "enabled": True,
                 "highlight_class": ".highlight-ipynb",
             },
             "SubCell": {"enabled": True, "start": start, "end": end},
         }
-    )
+
+    # Create the custom notebook converter
+    c = Config(config_dict)
 
     """
     # FIXME: doesn't use plugin as source of templates, see:
@@ -325,9 +464,15 @@ def notebook(preprocessor, tag, markup):
     """
 
     if IPYTHON_VERSION >= 2:
-        subcell_kwarg = dict(preprocessors=[SubCell])
+        if notebook_output is not False:
+            subcell_kwarg = dict(preprocessors=[SubCell, PelicanExtractOutputPreprocessor])
+        else:
+            subcell_kwarg = dict(preprocessors=[SubCell])
     else:
-        subcell_kwarg = dict(transformers=[SubCell])
+        if notebook_output is not False:
+            subcell_kwarg = dict(transformers=[SubCell, ExtractOutputTransformer])
+        else:
+            subcell_kwarg = dict(transformers=[SubCell])
 
     exporter = HTMLExporter(
         config=c,
@@ -348,6 +493,17 @@ def notebook(preprocessor, tag, markup):
                 nb_json = IPython.nbformat.reads(nb_text, as_version=4)
 
     (body, resources) = exporter.from_notebook_node(nb_json)
+    for name, data in resources.get("outputs", {}).items():
+        # We hardcode the output directory here... :(
+        abs_name = name
+        while abs_name.startswith("../"):
+            abs_name = abs_name.replace("../", "", 1)
+        full = os.path.join("output", abs_name)
+        new_name = os.path.normpath(full)
+        if not os.path.isdir(os.path.dirname(new_name)):
+            os.makedirs(os.path.dirname(new_name))
+        with open(new_name, "wb") as f:
+            f.write(data)
 
     # if we haven't already saved the header, save it here.
     if not notebook.header_saved:
